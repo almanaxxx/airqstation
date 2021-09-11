@@ -1,9 +1,19 @@
 #include <DHT.h>
 #include <ESP8266WiFi.h>
 #include <ESP8266WebServer.h>
+#include <SdsDustSensor.h>
 
 const char * wifi_ssid = "SpiderNet";
 const char * wifi_password = "81880728550737648282";
+
+/* SDS011 Dust Sensor */
+const int SDS_RX_PIN = D2;
+const int SDS_TX_PIN = D1;
+SoftwareSerial softwareSerial(SDS_RX_PIN, SDS_TX_PIN);
+SdsDustSensor sds(softwareSerial); //  additional parameters: retryDelayMs and maxRetriesNotAvailable
+const int MINUTE = 60000;
+const int WAKEUP_WORKING_TIME = 30000; // 30 seconds.
+const int MEASUREMENT_INTERVAL = 5 * MINUTE;
 
 // Uncomment the type of sensor in use:
 //#define DHTTYPE    DHT11     // DHT 11
@@ -11,21 +21,35 @@ const char * wifi_password = "81880728550737648282";
 //#define DHTTYPE    DHT21     // DHT 21 (AM2301)
 
 DHT dht(D7, DHTTYPE);
-//ESP8266WebServer server(8080);
-WiFiServer server(80);
+ESP8266WebServer webServer(80);
+
+// Current time
+unsigned long currentTime = millis();
+
+// Previous time
+unsigned long previousTime = 0;
+
+// Define timeout time in milliseconds (example: 2000ms = 2s)
+const long timeoutTime = 2000;
+
+String header;
 
 void setup() {
   // put your setup code here, to run once:
   pinMode(LED_BUILTIN, OUTPUT);
   Serial.begin(115200);
   dht.begin();
+  setupSDS();
   connectToWiFi();
 }
 
-//void setUpWebServer() {
-//  server.on("/", handleWebServerRequest);
-//  server.begin();
-//}
+void setupSDS() {
+  sds.begin();
+  Serial.print("SDS011 ");
+  Serial.println(sds.queryFirmwareVersion().toString());
+  // Ensures SDS011 is in 'query' reporting mode:
+  Serial.println(sds.setQueryReportingMode().toString());
+}
 
 void connectToWiFi() {
   Serial.printf("Connecting to '%s'\n", wifi_ssid);
@@ -35,92 +59,23 @@ void connectToWiFi() {
   if (WiFi.waitForConnectResult() == WL_CONNECTED) {
     Serial.print("Connected. IP: ");
     Serial.println(WiFi.localIP());
-    server.begin();
-    //setUpWebServer();
+    webServer.on("/current", handleWebServerRequest);
+    webServer.begin();
   } else {
     Serial.println("Connection Failed!");
   }
 }
 
-
-  // Current time
-unsigned long currentTime = millis();
-// Previous time
-unsigned long previousTime = 0;
-// Define timeout time in milliseconds (example: 2000ms = 2s)
-const long timeoutTime = 2000;
-String header;
-
 void loop() {
-  digitalWrite(LED_BUILTIN, LOW);
-
-  WiFiClient client = server.available();   // Listen for incoming clients
-
-  if (client) {                             // If a new client connects,
-    Serial.println("New Client.");          // print a message out in the serial port
-    String currentLine = "";                // make a String to hold incoming data from the client
-    currentTime = millis();
-    previousTime = currentTime;
-    while (client.connected() && currentTime - previousTime <= timeoutTime) { // loop while the client's connected
-      currentTime = millis();
-      if (client.available()) {             // if there's bytes to read from the client,
-        char c = client.read();             // read a byte, then
-        Serial.write(c);                    // print it out the serial monitor
-        header += c;
-        if (c == '\n') {                    // if the byte is a newline character
-          // if the current line is blank, you got two newline characters in a row.
-          // that's the end of the client HTTP request, so send a response:
-          if (currentLine.length() == 0) {
-            // HTTP headers always start with a response code (e.g. HTTP/1.1 200 OK)
-            // and a content-type so the client knows what's coming, then a blank line:
-            client.println("HTTP/1.1 200 OK");
-            client.println("Content-type:text/html");
-            client.println("Connection: close");
-            client.println();
-
-            // Display the HTML web page
-            float humidity = dht.readHumidity();
-            float temperature = dht.readTemperature();
-
-            client.println("<!DOCTYPE html><html>");
-            client.println("<title>Munties Meteostation</title>");
-            client.println("<head><meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">");
-            client.println("<link rel=\"icon\" href=\"data:,\">");
-            client.println("<style>html { font-family: Helvetica; display: inline-block; margin: 0px auto; text-align: center;}");
-            client.println("text-decoration: none; font-size: 30px; margin: 2px; cursor: pointer;}");
-            client.println("</style></head>");
-
-            client.println("<body>");
-            client.println("<h1>Welcome to Munties Meteostation!");
-            client.println("<h3>Humidity: ");
-            client.println(humidity);
-            client.println("</h3>");
-            client.println("<h3>Temperature: ");
-            client.println(temperature);
-            client.println("</h3>");
-            client.println("</body>");
-            client.println("</html>");
-            client.println();
-            break;
-          } else { // if you got a newline, then clear currentLine
-            currentLine = "";
-          }
-        } else if (c != '\r') {  // if you got anything else but a carriage return character,
-          currentLine += c;      // add it to the end of the currentLine
-        }
-      }
-    }
-    // Clear the header variable
-    header = "";
-    // Close the connection
-    client.stop();
-    Serial.println("Client disconnected.");
-    Serial.println("");
-  }
+  webServer.handleClient();
 }
 
-/*
 void handleWebServerRequest() {
+  float humidity = dht.readHumidity();
+  float temperature = dht.readTemperature();
+  
+  readDataFromSDS();
+
   Serial.println("------------------Somebody requested me");
   String message = "";
   message += "<!DOCTYPE html>";
@@ -129,8 +84,38 @@ void handleWebServerRequest() {
   message += "<title>Meteostation</title>";
   message += "</head>";
   message += "<body>";
-  message += "<h1>Hello World, I am a meteostation!</h1>";
+  message += "<h1>Hi there! I am a Munties Meteostation!</h1>";
+  message += "<h1>Humidity: " + String(humidity) + "%</h1>";
+  message += "<h1>Temperature: " + String(temperature) + " C</h1>";
   message += "</body>";
   message += "</html>";
-  server.send(200, "text/html", message);
-}*/
+  
+  webServer.send(200, "text/html", message);
+}
+
+void readDataFromSDS()
+{
+  sds.wakeup();
+  //delay(WAKEUP_WORKING_TIME);
+  delay(100);
+  // Get data from SDS011
+  PmResult pm = sds.queryPm();
+  if (pm.isOk()) {
+    Serial.print("PM2.5 = ");
+    Serial.print(pm.pm25); // float, μg/m3
+    Serial.print(", PM10 = ");
+    Serial.println(pm.pm10);
+  } else {
+    Serial.print("Could not read values from sensor, reason: ");
+    Serial.println(pm.statusToString());
+  }
+  
+  // Put SDS011 back to sleep
+  WorkingStateResult state = sds.sleep();
+  
+  if (state.isWorking()) {
+    Serial.println("Problem with sleeping the SDS011 sensor.");
+  } else {
+    Serial.println("SDS011 sensor is sleeping");
+  }
+}
