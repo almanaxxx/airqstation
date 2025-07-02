@@ -1,20 +1,27 @@
 #include <DHT.h>
 #include <ESP8266WiFi.h>
 #include <SdsDustSensor.h>
+#include <InfluxDbClient.h>
+#include <InfluxDbCloud.h>
 
-// const char * host = "192.168.178.21";
-// const char * url = "/sensor";
-// const int httpPort = 5000;
-// const int delayAfterSuccessfulSendingMs = 5 * 1000;
+const char * host = "192.168.179.59";
+const char * url = "/sensor";
+const int httpPort = 5000;
+const int delayAfterSuccessfulSendingMs = 5 * 1000;
 
-const char * host = "api.sensor.community";
-const char * url = "/v1/push-sensor-data/";
-const int httpPort = 80;
-const int delayAfterSuccessfulSendingMs = 70 * 1000;
+#define INFLUXDB_URL "http://192.168.179.48:8086"
+#define INFLUXDB_TOKEN "Jdt0cYftq-WnkbosSGF-vA3KM-d-c1nNCc7z4Qq-EJqupSniEQgGQNnlEgwtesBrv6PCMlyPkVfBHB37Cx0xyQ=="
+#define INFLUXDB_ORG "3cbd862919cba2c9"
+#define INFLUXDB_BUCKET "home-sensors"
+
+// Time zone info
+#define TZ_INFO "UTC2"
+
+InfluxDBClient influxDbClient(INFLUXDB_URL, INFLUXDB_ORG, INFLUXDB_BUCKET, INFLUXDB_TOKEN);
 
 /* WiFi settings */
-const char * wifi_ssid = "WiFi network name";
-const char * wifi_password = "WiFi network password";
+const char * wifi_ssid = "SpiderNet";
+const char * wifi_password = "81880728550737648282";
 WiFiClient client;
 
 /* SDS011 Dust Sensor */
@@ -27,6 +34,7 @@ SdsDustSensor sds(SDS_RX_PIN, SDS_TX_PIN);
 DHT dht(D7, DHTTYPE);
 
 String chipId;
+int wifiConnectionStatus;
 
 void setup()
 {
@@ -35,7 +43,7 @@ void setup()
     Serial.begin(115200);
     dht.begin();
     setupSDS();
-    connectToWiFi();
+    wifiConnectionStatus = connectToWiFi();
     chipId = String(ESP.getChipId());
     Serial.println("chipId=" + chipId);
 }
@@ -48,7 +56,7 @@ void setupSDS()
     Serial.println(sds.setContinuousWorkingPeriod().toString()); // ensures sensor has continuous working period - default but not recommended
 }
 
-void connectToWiFi()
+int connectToWiFi()
 {
     Serial.printf("Connecting to '%s'\n", wifi_ssid);
 
@@ -58,18 +66,35 @@ void connectToWiFi()
     {
         Serial.print("Connected. IP: ");
         Serial.println(WiFi.localIP());
+        return 1;
     }
     else
     {
         Serial.println("Connection Failed!");
+        return 0;
     }
 }
 
 void loop()
 {
+    if (wifiConnectionStatus == 0)
+    {
+        Serial.println("WiFi is not connected. Try to connect...");
+        wifiConnectionStatus = connectToWiFi();
+        if (wifiConnectionStatus == 0)
+        {
+            Serial.println("Unsuccessful attempt");
+            delay(5000);
+        }
+    }
+    else
+    {
+        // Serial.println("WiFi connected");
+    }
+    
     float humidity = dht.readHumidity();
     float temperature = dht.readTemperature();
-    if (sendData(7, "humidity", humidity, "temperature", temperature))
+    if (sendDataToInfluxDB("humidity", humidity, "temperature", temperature))
     {
         delay(delayAfterSuccessfulSendingMs);
     }
@@ -77,7 +102,7 @@ void loop()
     PmResult pm = sds.readPm();
     if (pm.isOk())
     {
-        if (sendData(1, "P1", pm.pm10, "P2", pm.pm25))
+        if (sendDataToInfluxDB("pm10", pm.pm10, "pm25", pm.pm25))
         {
             delay(delayAfterSuccessfulSendingMs);
         }
@@ -85,53 +110,22 @@ void loop()
     else
     {
         Serial.println("SDS status: " + pm.statusToString());
+        delay(10000);
     }
 }
 
-int sendData(int pin, String header1, float val1, String header2, float val2)
-{
-    if (client.connect(host, httpPort))
-    {
-        Serial.println("connection successfully: " + String(host));
+int sendDataToInfluxDB(String header1, float val1, String header2, float val2) {
+    Point sensorData("sensor_data");
+    sensorData.addTag("device", "esp8266_01");
+    sensorData.addField(header1, val1);   // replace with actual sensor readings
+    sensorData.addField(header2, val2);
+
+    if (influxDbClient.writePoint(sensorData)) {
+      Serial.println("Data written successfully.");
+      return 1;
+    } else {
+      Serial.print("Write failed: ");
+      Serial.println(influxDbClient.getLastErrorMessage());
+      return 0;
     }
-    else
-    {
-        Serial.println("connection failed");
-        return 0;
-    }
-
-    Serial.println();
-
-    String body = "{";
-    body += "\"software_version\":\"0.1\",";
-    body += "\"sensordatavalues\": [";
-    body += "{\"value_type\":\"" + header1 + "\", \"value\":\"" + String(val1) + "\"},";
-    body += "{\"value_type\":\"" + header2 + "\", \"value\":\"" + String(val2) + "\"}";
-    body += "]}\r\n";
-
-    String httpMessage = "POST " + String(url) + " HTTP/1.1\r\n";
-    httpMessage += "Content-Type: application/json\r\n";
-    httpMessage += "X-Pin: " + String(pin) + "\r\n";
-    httpMessage += "Content-Length: " + String(body.length()) + "\r\n";
-    httpMessage += "Host: " + String(host) + "\r\n";
-    httpMessage += "X-Sensor: esp8266-" + chipId + "\r\n";
-    httpMessage += "Connection: close\r\n\r\n";
-    httpMessage += body;
-
-    Serial.println("send message:");
-    Serial.println(httpMessage);
-
-    client.println(httpMessage);
-
-    Serial.println("read response:");
-    while(client)
-    {
-        Serial.print((char)client.read());
-    }
-
-    client.stop();
-
-    Serial.println("\r\ndisconnected");
-
-    return 1;
 }
